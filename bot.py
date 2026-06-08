@@ -29,6 +29,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BITESHIP_API_KEY = os.getenv("BITESHIP_API_KEY")
 BITESHIP_BASE = "https://api.biteship.com/v1"
+TRACK17_TOKEN = os.getenv("TRACK17_TOKEN")
+TRACK17_BASE = "https://api.17track.net/track/v2"
 CHECK_INTERVAL = 1800   # 30 min auto-check
 DB_PATH = "resi_tracker.db"
 MAX_RESI_PER_USER = 5
@@ -54,6 +56,7 @@ COURIERS = {
     "grab": {"name": "Grab Express", "emoji": "🟢"},
     "gojek": {"name": "GoSend", "emoji": "🏍️"},
     "borzo": {"name": "Borzo", "emoji": "⚡"},
+    "spx": {"name": "Shopee Express", "emoji": "🟣"},
     "rpx": {"name": "RPX", "emoji": "📦"},
 }
 
@@ -192,6 +195,142 @@ def track_resi(waybill, courier_code, use_cache=True):
         logger.debug(f"Track {waybill}/{courier_code}: {e}")
         return None
 
+def track_17track(waybill, use_cache=True):
+    """Track via 17track API (for SPX)"""
+    cache_key = f"17t_{waybill}"
+
+    # Check cache
+    if use_cache and cache_key in track_cache:
+        cached = track_cache[cache_key]
+        if time.time() - cached["timestamp"] < CACHE_TTL:
+            logger.debug(f"Cache hit 17track: {cache_key}")
+            return cached["data"]
+
+    try:
+        # Step 1: Register tracking
+        reg_data = json.dumps([{"number": waybill}]).encode()
+        req = urllib.request.Request(
+            f"{TRACK17_BASE}/register",
+            data=reg_data,
+            headers={
+                "17token": TRACK17_TOKEN,
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            reg_resp = json.loads(resp.read().decode())
+
+        if reg_resp.get("code") != 0:
+            return None
+
+        accepted = reg_resp.get("data", {}).get("accepted", [])
+        if not accepted:
+            return None
+
+        carrier = accepted[0].get("carrier", 0)
+
+        # Step 2: Get tracking info (try immediately, then retry if needed)
+        import time as t
+        t.sleep(2)
+
+        get_data = json.dumps([{"number": waybill}]).encode()
+        req2 = urllib.request.Request(
+            f"{TRACK17_BASE}/gettrackinfo",
+            data=get_data,
+            headers={
+                "17token": TRACK17_TOKEN,
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req2, timeout=15) as resp2:
+            result = json.loads(resp2.read().decode())
+
+        if result.get("code") != 0:
+            return None
+
+        track_info = (result.get("data", {}).get("accepted", [{}]) or [{}])[0].get("track_info", {})
+        if not track_info:
+            return None
+
+        # Convert to our format
+        providers = track_info.get("tracking", {}).get("providers", [])
+        provider_name = providers[0].get("provider", {}).get("name", "Shopee Express") if providers else "Shopee Express"
+
+        events = []
+        if providers:
+            for evt in providers[0].get("events", []):
+                events.append({
+                    "status": evt.get("stage", "InTransit"),
+                    "description": evt.get("description", ""),
+                    "updated_at": evt.get("time_iso", ""),
+                    "location": ""
+                })
+
+        latest = track_info.get("latest_status", {})
+        latest_event = track_info.get("latest_event", {})
+
+        data = {
+            "success": True,
+            "courier_name": provider_name,
+            "history": events if events else [{
+                "status": latest.get("status", "InTransit"),
+                "description": latest_event.get("description", ""),
+                "updated_at": latest_event.get("time_iso", ""),
+                "location": ""
+            }]
+        }
+
+        # Save to cache
+        track_cache[cache_key] = {"data": data, "timestamp": time.time()}
+        return data
+
+    except Exception as e:
+        logger.error(f"17track error {waybill}: {e}")
+        return None
+
+def format_tracking_17track(data, waybill):
+    """Format 17track tracking data for display"""
+    if not data or not data.get("success"):
+        return None
+
+    history = data.get("history", [])
+    courier_name = data.get("courier_name", "Shopee Express")
+
+    if not history:
+        return f"📦 **{waybill}** ({courier_name})\nBelum ada riwayat pengiriman."
+
+    latest = history[0]
+    status = latest.get("status", "Unknown")
+    desc = latest.get("description", "")
+    date = latest.get("updated_at", "")
+
+    status_emoji = {
+        "InfoReceived": "📝", "PickedUp": "✅", "InTransit": "🚚",
+        "Delivered": "📬", "AvailableForPickup": "📦", "OutForDelivery": "🏃",
+        "Returning": "↩️", "Returned": "↩️", "FailedDelivery": "❌"
+    }
+    emoji = status_emoji.get(status, "📦")
+
+    msg = f"{emoji} **{waybill}** ({courier_name})\n"
+    msg += f"Status: **{status.upper()}**\n"
+    if desc:
+        msg += f"Detail: {desc}\n"
+    if date:
+        msg += f"Update: {date}\n"
+
+    if len(history) > 1:
+        msg += f"\n📋 **Riwayat:**\n"
+        for h in history[:3]:
+            h_status = h.get("status", "")
+            h_desc = h.get("description", "")
+            h_date = h.get("updated_at", "")
+            h_emoji = status_emoji.get(h_status, "•")
+            msg += f"  {h_emoji} {h_desc} ({h_date})\n"
+
+    return msg
+
 def format_tracking(data, waybill, courier_name):
     if not data or not data.get("success"):
         return None
@@ -247,6 +386,7 @@ def main_menu_keyboard():
             InlineKeyboardButton("🟢 Anteraja", callback_data="add_anteraja")],
         [InlineKeyboardButton("📮 Pos", callback_data="add_pos"),
             InlineKeyboardButton("🥷 Ninja", callback_data="add_ninja")],
+        [InlineKeyboardButton("🟣 SPX (Shopee)", callback_data="add_spx")],
         [InlineKeyboardButton("🟠 TIKI", callback_data="add_tiki")],
         [
             InlineKeyboardButton("📋 Lihat Resi", callback_data="list"),
@@ -304,7 +444,7 @@ Lacak paket Shopee & marketplace lainnya!{slot_info}
 📋 Untuk melihat daftar resi yang loe simpan, klik **"Lihat Resi"**
 
 ⚠️ _Bot masih dalam tahap pengembangan_
-❌ _Belum support tracking SPX (Shopee Express)_
+✅ _Sekarang support tracking SPX (Shopee Express)!_
 👨‍💻 Dibuat oleh Rahman Hidayat
     """
     if update.message:
@@ -404,8 +544,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         _, wb, courier_code, courier_name, label, _ = found
-        track_data = track_resi(wb, courier_code)
-        msg = format_tracking(track_data, wb, courier_name)
+
+        # Use 17track for SPX
+        if courier_code == "spx":
+            track_data = track_17track(wb)
+            msg = format_tracking_17track(track_data, wb)
+        else:
+            track_data = track_resi(wb, courier_code)
+            msg = format_tracking(track_data, wb, courier_name)
         if msg:
             if label:
                 msg = f"🏷️ **{label}**\n\n{msg}"
@@ -486,6 +632,48 @@ async def handle_waybill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "courier":
         courier_code = state.get("courier_code")
         c_info = COURIERS[courier_code]
+
+        # Check if SPX - use 17track
+        if courier_code == "spx":
+            loading = await update.message.reply_text(f"{c_info['emoji']} Mengecek `{waybill}` via 17track...", parse_mode="Markdown")
+            data = track_17track(waybill)
+
+            if data and data.get("success"):
+                added = db_add(chat_id, waybill, "spx", "Shopee Express")
+                if not added:
+                    await loading.edit_text(
+                        f"⚠️ Resi `{waybill}` udah ditrack.", parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📋 Lihat Semua", callback_data="list")],
+                            [InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]
+                        ])
+                    )
+                else:
+                    msg = format_tracking_17track(data, waybill)
+                    if msg:
+                        msg = f"✅ **Resi ditambahkan!**\n\n{msg}"
+                        await loading.edit_text(msg, parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔄 Refresh", callback_data=f"status_{waybill}")],
+                                [InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]
+                            ]))
+                    else:
+                        await loading.edit_text(
+                            f"✅ Resi `{waybill}` ditambahkan (Shopee Express)",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]])
+                        )
+            else:
+                await loading.edit_text(
+                    f"❌ Gak bisa track `{waybill}` di SPX.\nPastikan nomor resi benar.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]])
+                )
+
+            user_state.pop(chat_id, None)
+            return ConversationHandler.END
+
+        # Non-SPX couriers - use Biteship
         loading = await update.message.reply_text(f"{c_info['emoji']} Mengecek `{waybill}`...", parse_mode="Markdown")
         data = track_resi(waybill, courier_code)
 
@@ -528,6 +716,38 @@ async def handle_waybill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Auto-detect
     loading = await update.message.reply_text(f"🔍 Auto-detecting `{waybill}`...", parse_mode="Markdown")
 
+    # Check if it's SPX format first
+    if waybill.upper().startswith("SPX"):
+        data = track_17track(waybill)
+        if data and data.get("success"):
+            added = db_add(chat_id, waybill, "spx", "Shopee Express")
+            if not added:
+                await loading.edit_text(
+                    f"⚠️ Resi `{waybill}` udah ditrack.", parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Lihat Semua", callback_data="list")],
+                        [InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]
+                    ])
+                )
+            else:
+                msg = format_tracking_17track(data, waybill)
+                if msg:
+                    msg = f"✅ Kurir: **🟣 Shopee Express**\n\n{msg}"
+                    await loading.edit_text(msg, parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Refresh", callback_data=f"status_{waybill}")],
+                            [InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]
+                        ]))
+                else:
+                    await loading.edit_text(
+                        f"✅ Kurir: **🟣 Shopee Express**\nResi ditambahkan!",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]])
+                    )
+            user_state.pop(chat_id, None)
+            return ConversationHandler.END
+
+    # Try Biteship couriers
     found_code = None
     found_data = None
     for code in AUTO_DETECT_ORDER:
@@ -611,6 +831,27 @@ async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Check if SPX format
+    if waybill.startswith("SPX"):
+        loading = await update.message.reply_text(f"🔍 Auto-detecting `{waybill}`...", parse_mode="Markdown")
+        data = track_17track(waybill)
+        if data and data.get("success"):
+            db_add(chat_id, waybill, "spx", "Shopee Express")
+            msg = format_tracking_17track(data, waybill)
+            if msg:
+                msg = f"✅ Kurir: **🟣 Shopee Express**\n\n{msg}"
+                await loading.edit_text(msg, parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Refresh", callback_data=f"status_{waybill}")],
+                        [InlineKeyboardButton("◀️ Menu", callback_data="back_menu")]
+                    ]))
+            return
+        await loading.edit_text(
+            f"❌ Gak detect kurir `{waybill}`.\nPilih kurir manual:",
+            parse_mode="Markdown", reply_markup=main_menu_keyboard()
+        )
+        return
+
     # Auto-detect
     loading = await update.message.reply_text(f"🔍 Auto-detecting `{waybill}`...", parse_mode="Markdown")
     for code in AUTO_DETECT_ORDER:
@@ -649,6 +890,63 @@ async def auto_check(context: ContextTypes.DEFAULT_TYPE):
     notified = 0
 
     for resi_id, chat_id, waybill, courier_code, last_status, last_checkpoint in all_resi:
+        # Use 17track for SPX, Biteship for others
+        if courier_code == "spx":
+            data_17 = track_17track(waybill, use_cache=False)
+            if data_17 and data_17.get("success"):
+                history = data_17.get("history", [])
+                if history:
+                    latest = history[0]
+                    new_status = latest.get("status", "")
+                    new_desc = latest.get("description", "")
+                    new_date = latest.get("updated_at", "")
+
+                    status_changed = (new_status != last_status) if last_status else False
+                    checkpoint_key = f"{new_status}|{new_desc}"
+                    checkpoint_changed = (checkpoint_key != last_checkpoint) if last_checkpoint else False
+
+                    if status_changed or checkpoint_changed or not last_status:
+                        db_update_status(resi_id, new_status, checkpoint_key)
+
+                        if last_status and (status_changed or checkpoint_changed):
+                            status_emoji = {
+                                "InfoReceived": "📝", "PickedUp": "✅", "InTransit": "🚚",
+                                "Delivered": "📬", "OutForDelivery": "🏃", "FailedDelivery": "❌"
+                            }
+                            emoji = status_emoji.get(new_status, "📦")
+
+                            conn = sqlite3.connect(DB_PATH)
+                            c = conn.cursor()
+                            c.execute("SELECT label FROM resi WHERE id = ?", (resi_id,))
+                            r = c.fetchone()
+                            conn.close()
+                            label = r[0] if r else ""
+
+                            notif = f"🔔 **Update Resi!**\n\n"
+                            if label:
+                                notif += f"🏷️ {label}\n"
+                            notif += f"📦 `{waybill}`\n"
+                            notif += f"{emoji} **{new_status}**\n"
+                            if new_desc:
+                                notif += f"📝 {new_desc}\n"
+                            if new_date:
+                                notif += f"🕐 {new_date}\n"
+                            if new_status == "Delivered":
+                                notif += "\n🎉 **Paket udah sampai!**"
+
+                            keyboard = InlineKeyboardMarkup([
+                                [InlineKeyboardButton("📋 Lihat Detail", callback_data=f"status_{waybill}")],
+                            ])
+
+                            try:
+                                await context.bot.send_message(chat_id=chat_id, text=notif, parse_mode="Markdown", reply_markup=keyboard)
+                                notified += 1
+                            except Exception as e:
+                                logger.error(f"Notify fail {chat_id}: {e}")
+            await asyncio.sleep(1)
+            continue
+
+        # Biteship for other couriers
         data = track_resi(waybill, courier_code, use_cache=False)  # Bypass cache for auto-check
         if not data or not data.get("success"):
             continue
