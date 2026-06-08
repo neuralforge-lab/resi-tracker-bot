@@ -265,9 +265,9 @@ def track_17track(waybill, use_cache=True):
         if providers:
             for evt in providers[0].get("events", []):
                 events.append({
-                    "status": evt.get("stage", "InTransit"),
-                    "description": evt.get("description", ""),
-                    "updated_at": evt.get("time_iso", ""),
+                    "status": evt.get("stage") or "InTransit",
+                    "description": evt.get("description") or "",
+                    "updated_at": evt.get("time_iso") or "",
                     "location": ""
                 })
 
@@ -276,11 +276,11 @@ def track_17track(waybill, use_cache=True):
 
         data = {
             "success": True,
-            "courier_name": provider_name,
+            "courier_name": provider_name or "Shopee Express",
             "history": events if events else [{
-                "status": latest.get("status", "InTransit"),
-                "description": latest_event.get("description", ""),
-                "updated_at": latest_event.get("time_iso", ""),
+                "status": latest.get("status") or "InTransit",
+                "description": latest_event.get("description") or "",
+                "updated_at": latest_event.get("time_iso") or "",
                 "location": ""
             }]
         }
@@ -299,15 +299,15 @@ def format_tracking_17track(data, waybill):
         return None
 
     history = data.get("history", [])
-    courier_name = data.get("courier_name", "Shopee Express")
+    courier_name = data.get("courier_name") or "Shopee Express"
 
     if not history:
         return f"📦 **{waybill}** ({courier_name})\nBelum ada riwayat pengiriman."
 
     latest = history[0]
-    status = latest.get("status", "Unknown")
-    desc = latest.get("description", "")
-    date = latest.get("updated_at", "")
+    status = latest.get("status") or "Unknown"
+    desc = latest.get("description") or ""
+    date = latest.get("updated_at") or ""
 
     status_emoji = {
         "InfoReceived": "📝", "PickedUp": "✅", "InTransit": "🚚",
