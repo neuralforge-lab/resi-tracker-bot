@@ -221,18 +221,21 @@ def track_17track(waybill, use_cache=True):
         with urllib.request.urlopen(req, timeout=15) as resp:
             reg_resp = json.loads(resp.read().decode())
 
+        # code 0 = OK, even if rejected (already registered)
         if reg_resp.get("code") != 0:
             return None
 
         accepted = reg_resp.get("data", {}).get("accepted", [])
-        if not accepted:
+        rejected = reg_resp.get("data", {}).get("rejected", [])
+
+        # If rejected because already registered, that's fine - continue to gettrackinfo
+        if not accepted and not rejected:
             return None
 
-        carrier = accepted[0].get("carrier", 0)
-
-        # Step 2: Get tracking info (try immediately, then retry if needed)
-        import time as t
-        t.sleep(2)
+        # Wait a bit for 17track to fetch data (only if newly registered)
+        if accepted:
+            import time as t
+            t.sleep(2)
 
         get_data = json.dumps([{"number": waybill}]).encode()
         req2 = urllib.request.Request(
