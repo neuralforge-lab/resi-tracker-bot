@@ -593,8 +593,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Limits:**
 • Max {MAX_RESI_PER_USER} resi per user
 • Cache 5 menit (hemat API)
-• Auto-check tiap 30 menit
+• Auto-check tiap 30 menit (kecuali SPX)
 • Rate limit: 10 cek/menit
+
+📌 **SPX (Shopee Express):** Klik "🔄 Refresh" manual untuk cek status
 
 🔄 Auto-notif kalo status berubah!
         """
@@ -893,60 +895,11 @@ async def auto_check(context: ContextTypes.DEFAULT_TYPE):
     notified = 0
 
     for resi_id, chat_id, waybill, courier_code, last_status, last_checkpoint in all_resi:
-        # Use 17track for SPX, Biteship for others
+        # Use 17track for SPX - MANUAL ONLY (no auto-check to save API)
         if courier_code == "spx":
-            data_17 = track_17track(waybill, use_cache=False)
-            if data_17 and data_17.get("success"):
-                history = data_17.get("history", [])
-                if history:
-                    latest = history[0]
-                    new_status = latest.get("status", "")
-                    new_desc = latest.get("description", "")
-                    new_date = latest.get("updated_at", "")
-
-                    status_changed = (new_status != last_status) if last_status else False
-                    checkpoint_key = f"{new_status}|{new_desc}"
-                    checkpoint_changed = (checkpoint_key != last_checkpoint) if last_checkpoint else False
-
-                    if status_changed or checkpoint_changed or not last_status:
-                        db_update_status(resi_id, new_status, checkpoint_key)
-
-                        if last_status and (status_changed or checkpoint_changed):
-                            status_emoji = {
-                                "InfoReceived": "📝", "PickedUp": "✅", "InTransit": "🚚",
-                                "Delivered": "📬", "OutForDelivery": "🏃", "FailedDelivery": "❌"
-                            }
-                            emoji = status_emoji.get(new_status, "📦")
-
-                            conn = sqlite3.connect(DB_PATH)
-                            c = conn.cursor()
-                            c.execute("SELECT label FROM resi WHERE id = ?", (resi_id,))
-                            r = c.fetchone()
-                            conn.close()
-                            label = r[0] if r else ""
-
-                            notif = f"🔔 **Update Resi!**\n\n"
-                            if label:
-                                notif += f"🏷️ {label}\n"
-                            notif += f"📦 `{waybill}`\n"
-                            notif += f"{emoji} **{new_status}**\n"
-                            if new_desc:
-                                notif += f"📝 {new_desc}\n"
-                            if new_date:
-                                notif += f"🕐 {new_date}\n"
-                            if new_status == "Delivered":
-                                notif += "\n🎉 **Paket udah sampai!**"
-
-                            keyboard = InlineKeyboardMarkup([
-                                [InlineKeyboardButton("📋 Lihat Detail", callback_data=f"status_{waybill}")],
-                            ])
-
-                            try:
-                                await context.bot.send_message(chat_id=chat_id, text=notif, parse_mode="Markdown", reply_markup=keyboard)
-                                notified += 1
-                            except Exception as e:
-                                logger.error(f"Notify fail {chat_id}: {e}")
-            await asyncio.sleep(1)
+            # Only check if user manually triggered (not auto-check)
+            # Skip in auto-check loop
+            await asyncio.sleep(0.5)
             continue
 
         # Biteship for other couriers
